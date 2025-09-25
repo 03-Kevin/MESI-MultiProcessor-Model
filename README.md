@@ -1,73 +1,73 @@
 # MESI-MultiProcessor-Model
 
-**Simulación académica de un sistema multiprocesador con coherencia de caché MESI**  
-Modelo orientado a la enseñanza: 4 Processing Elements (PEs) con cachés privadas 2-way, memoria compartida y un interconnect que implementa el protocolo MESI. Incluye ejemplos para ejecutar el benchmark del producto punto en paralelo y recopilar métricas.
+**Academic simulation of a multiprocessor system with MESI cache coherence**  
+Teaching-oriented model: 4 Processing Elements (PEs) with private 2-way caches, shared memory, and an interconnect implementing the MESI protocol. Includes examples to run parallel dot product benchmarks and collect metrics.
 
 ---
 
-## Estado del proyecto
-**Avance:** Semana 1 — Planificación y definición (documentos y estructura inicial).  
-**Objetivo actual:** Entregar Avance 1 con objetivos específicos, roles, extracción de requisitos y bibliografía.
+## Project Status
+**Progress:** Week 1 — Planning and definition (documents and initial structure).  
+**Current objective:** Deliver Milestone 1 with specific objectives, roles, requirements extraction, and bibliography.
 
 ---
 
-## Descripción corta
-Simulación académica de un sistema multiprocesador con coherencia MESI (4 PEs, cachés 2-way, write-back / write-allocate).
+## Short Description
+Academic simulation of a multiprocessor system with MESI coherence (4 PEs, 2-way caches, write-back / write-allocate).
 
 ---
 
-## Características principales
-- 4 PEs, cada uno con 8 registros de 64 bits.  
-- Caché privada por PE: 2-way set associative, 16 bloques × 32 bytes, write-allocate + write-back.  
-- Protocolo MESI: estados y mensajes (BusRd, BusRdX, BusUpgr, Writeback...).  
-- Memoria principal simulada: 512 posiciones de 64 bits.  
-- Modelo hardware-like: componentes modelados con threads.  
-- Recolección de métricas por PE: cache misses, invalidaciones, tráfico de bus, transiciones MESI, accesos R/W.  
-- Benchmark: producto punto paralelo y validación automática.
+## Key Features
+- 4 PEs, each with 8 64-bit registers.  
+- Private cache per PE: 2-way set associative, 16 blocks × 32 bytes, write-allocate + write-back.  
+- MESI Protocol: states and messages (BusRd, BusRdX, BusUpgr, Writeback...).  
+- Simulated main memory: 512 64-bit positions.  
+- Hardware-like model: components modeled with threads.  
+- Metrics collection per PE: cache misses, invalidations, bus traffic, MESI transitions, R/W accesses.  
+- Benchmark: parallel dot product and automatic validation.
 
 ---
 
-## Requisitos 
-- **Lenguaje recomendado:** C++ (recomendado) o SystemVerilog (no sintetizable).  
-- **Herramientas sugeridas (C++):** CMake, g++/clang++.  
-- **Sistema operativo:** Linux / macOS / Windows (con entorno de desarrollo).  
-> Nota: Python **no** está permitido según la especificación del curso.
+## Requirements 
+- **Recommended language:** C++ (recommended) or SystemVerilog (non-synthesizable).  
+- **Suggested tools (C++):** CMake, g++/clang++.  
+- **Operating system:** Linux / macOS / Windows (with development environment).  
+> Note: Python is **not** allowed.
 
 ---
 
-## Estructura
+## Structure
 ```
-/docs/                 # Documentación (avance1.pdf, acta, bibliografía)
-/diagrams/             # Diagramas (arquitectura.png)
-/src/                  # Código fuente (simulador, módulos, utilidades)
-/src/examples/         # Ejemplos ASM/benchmarks (producto punto por segmento)
-/tests/                # Scripts de prueba y validación
-/scripts/              # Scripts de build / run / análisis
+/docs/                 # Documentation (milestone1.pdf, meeting notes, bibliography)
+/diagrams/             # Diagrams (architecture.png)
+/src/                  # Source code (simulator, modules, utilities)
+/src/examples/         # ASM examples/benchmarks (dot product by segment)
+/tests/                # Test scripts and validation
+/scripts/              # Build / run / analysis scripts
 /README.md
 /LICENSE
 ```
 
 ---
 
-## Cómo compilar / ejecutar 
-> Ajustar comandos reales según la implementación.
+## How to compile / run 
+> Adjusts throughout the project.
 
-### Ejemplo (C++ con CMake)
+### Example (C++ with CMake)
 ```bash
-# clonar repo
+# clone repo
 git clone <repo-url>
 cd MESI-MultiProcessor-Model
 
-# compilar
+# compile
 mkdir -p build && cd build
 cmake ..
 make -j$(nproc)
 
-# ejecutar (placeholder)
+# run (placeholder)
 ./mp_mesi_simulator --load ../src/examples/pdot_seg.asm --mem-config ../config/mem.cfg
 ```
 
-### Ejemplo (SystemVerilog - ModelSim/Questa)
+### Example (SystemVerilog - ModelSim/Questa)
 ```bash
 vlog src/*.sv
 vsim top_tb
@@ -75,40 +75,38 @@ vsim top_tb
 
 ---
 
-## Archivos clave a incluir en la entrega Avance1
-- `docs/avance1.pdf` — planificación, objetivos SMART, roles, requisitos técnicos extraídos (obligatorio).  
-- `diagrams/arquitectura.png` — diagrama de alto nivel (PEs, cachés, interconnect, memoria).  
-- `docs/cache_mesi.md` — especificación de caché y tabla de transiciones MESI.  
-- `src/examples/pdot_seg.asm` — ejemplo ASM para un segmento del producto punto.  
-- `docs/acta_reunion_inicial.pdf` — acta firmada por los 3 integrantes.  
-- `README.md` — este archivo (actualizar con instrucciones reales).  
+## Key files to include in Milestone 1 delivery
+- `docs/milestone1.pdf` — planning, objectives, roles, extracted technical requirements.  
+- `diagrams/architecture.png` — high-level diagram (PEs, caches, interconnect, memory).  
+- `docs/cache_mesi.md` — cache specification and MESI transition table.  
+- `src/examples/pdot_seg.asm` — ASM example for a dot product segment.   
+- `README.md` — Project instructions.  
 
 ---
 
-## Checklist Avance1 (pegar en el ZIP de entrega)
-- [ ] `avance1.pdf` (portada, objetivos, requisitos, roles, plan, bibliografía).  
-- [ ] `diagrams/arquitectura.png`.  
+## Checklist Milestone1 (paste in delivery ZIP)
+- [ ] `milestone1.pdf` (cover, objectives, requirements, roles, plan, bibliography).  
+- [ ] `diagrams/architecture.png`.  
 - [ ] `docs/cache_mesi.md`.  
-- [ ] `src/examples/pdot_seg.asm`.  
-- [ ] `docs/acta_reunion_inicial.pdf` (firmada).  
-- [ ] `README.md` actualizado.  
-- [ ] Primer commit: `init: estructura proyecto - avance1` y tag `avance1`.  
-- [ ] ZIP con todo y subida a Tec Digital antes de la fecha.
+- [ ] `src/examples/pdot_seg.asm`.
+- [ ] `README.md` updated.  
+- [ ] First commit: `init: project structure - milestone1` and tag `milestone1`.  
+- [ ] ZIP with everything and upload to Tec Digital before deadline.
 
 ---
 
-## Convenciones de desarrollo
-- Rama principal: `main` (siempre estable).  
-- Ramas de trabajo: `feature/<nombre>` (una tarea por branch).  
-- Mensajes de commit claros: `feat:`, `fix:`, `docs:`, `chore:`.  
-- Abrir PRs para merges y usar reviewers entre los integrantes.
+## Development Conventions
+- Main branch: `main` (always stable).  
+- Working branches: `feature/<name>` (one task per branch).  
+- Clear commit messages: `feat:`, `fix:`, `docs:`, `chore:`.  
+- Open PRs for merges and use reviewers among team members.
 
 ---
 
-## Cómo contribuir
-1. Fork → Clone → Crear branch: `feature/<nombre>`.  
-2. Hacer commits atómicos y descriptivos.  
-3. Abrir PR hacia `main` con descripción y pruebas realizadas.  
-4. Asignar reviewer y aprobar antes de merge.
+## How to contribute
+1. Fork → Clone → Create branch: `feature/<name>`.  
+2. Make atomic and descriptive commits.  
+3. Open PR towards `main` with description and tests performed.  
+4. Assign reviewer and approve before merge.
 
 ---
