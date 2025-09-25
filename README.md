@@ -55,7 +55,7 @@ Academic simulation of a multiprocessor system with MESI coherence (4 PEs, 2-way
 ### Example (C++ with CMake)
 ```bash
 # clone repo
-git clone <repo-url>
+git clone https://github.com/03-Kevin/MESI-MultiProcessor-Model.git
 cd MESI-MultiProcessor-Model
 
 # compile
