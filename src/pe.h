@@ -2,8 +2,6 @@
 #define PE_H
 
 #include "cache.h"
-#include "memory.h"
-#include "bus.h"
 #include <pthread.h>
 
 typedef struct {

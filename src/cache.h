@@ -2,6 +2,8 @@
 #define CACHE_H
 
 #include "mesi.h"
+#include "bus.h"
+#include "memory.h"
 
 #define SETS 16
 #define WAYS 2
