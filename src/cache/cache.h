@@ -1,9 +1,9 @@
 #ifndef CACHE_H
 #define CACHE_H
 
-#include "mesi.h"
+#include "mesi/mesi.h"
 #include "bus.h"
-#include "memory.h"
+#include "memory/memory.h"
 
 #define SETS 16
 #define WAYS 2

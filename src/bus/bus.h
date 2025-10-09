@@ -1,7 +1,7 @@
 #ifndef BUS_H
 #define BUS_H
 
-#include "memory.h"
+#include "memory/memory.h"
 
 typedef enum { BUS_RD, BUS_RDX, BUS_INV, BUS_WB } BusMsg;
 

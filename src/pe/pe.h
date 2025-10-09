@@ -1,7 +1,7 @@
 #ifndef PE_H
 #define PE_H
 
-#include "cache.h"
+#include "cache/cache.h"
 #include <pthread.h>
 
 typedef struct {
