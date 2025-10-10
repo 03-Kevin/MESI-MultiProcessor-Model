@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "bus.h": "c",
+        "cache.h": "c"
+    }
+}
