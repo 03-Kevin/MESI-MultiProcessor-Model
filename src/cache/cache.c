@@ -1,7 +1,9 @@
 #include "cache.h"
+#include "bus/bus.h"
 #include <stdio.h>
 
 void cache_init(Cache* cache) {
+    cache->bus = NULL;
     for (int i = 0; i < SETS; i++)
         for (int j = 0; j < WAYS; j++) {
             cache->sets[i].lines[j].valid = 0;
@@ -24,7 +26,7 @@ double cache_read(Cache* cache, int addr, int pe_id) {
 
     // Miss → contactar bus
     printf("[PE%d] MISS en set %d, pidiendo BusRd\n", pe_id, set_index);
-    bus_broadcast(BUS_RD, addr, pe_id);
+    bus_broadcast(cache->bus, BUS_RD, addr, pe_id);
 
     // Simular lectura desde memoria principal
     double val = mem_read(addr);
@@ -54,7 +56,7 @@ void cache_write(Cache* cache, int addr, double value, int pe_id) {
 
     if (!found) {
         printf("[PE%d] WRITE miss en set %d, enviando BusRdX\n", pe_id, set_index);
-        bus_broadcast(BUS_RDX, addr, pe_id);
+        bus_broadcast(cache->bus, BUS_RDX, addr, pe_id);
         set->lines[0].valid = 1;
         set->lines[0].tag = tag;
         set->lines[0].state = M;
@@ -63,4 +65,17 @@ void cache_write(Cache* cache, int addr, double value, int pe_id) {
 
     // Política write-back: actualizar memoria solo si está en M al reemplazar
     mem_write(addr, value);
+}
+
+CacheLine* cache_get_line(Cache* cache, int addr) {
+    int set_index = addr % SETS;
+    unsigned long tag = addr / SETS;
+    CacheSet* set = &cache->sets[set_index];
+
+    for (int i = 0; i < WAYS; i++) {
+        if (set->lines[i].valid && set->lines[i].tag == tag) {
+            return &set->lines[i];
+        }
+    }
+    return NULL;
 }

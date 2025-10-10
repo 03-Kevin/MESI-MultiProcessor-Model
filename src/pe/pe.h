@@ -7,7 +7,7 @@
 typedef struct {
     int id;
     double regs[8];
-    Cache cache;
+    Cache* cache;
 } PE;
 
 void* pe_run(void* arg);

@@ -1,11 +1,11 @@
 #ifndef BUS_H
 #define BUS_H
 
+#include "include/config.h"
 #include "memory/memory.h"
 #include "cache/cache.h"
 
-#define NUM_PES 4
-
+// Tipos de mensajes del bus
 typedef enum { BUS_RD, BUS_RDX, BUS_UPGR, BUS_WB } BusMsg;
 
 struct Bus; // Declaración adelantada
