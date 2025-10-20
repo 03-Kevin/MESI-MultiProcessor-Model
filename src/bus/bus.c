@@ -16,13 +16,19 @@ void bus_init(Bus* bus, Cache* caches[]) {
 
 void bus_broadcast(Bus* bus, BusMsg msg, int addr, int src_pe) {
     pthread_mutex_lock(&bus_lock);
+
+    // Este log es agregado solo para validación
     printf("[BUS] Señal %d recibida de PE%d (addr=%d)\n", msg, src_pe, addr);
 
     // Llamar al handler correspondiente
-    if (bus->handlers[msg])
+    if (bus->handlers[msg]) {
+        // Este log es agregado solo para validación
+        printf("[BUS] Ejecutando handler para señal %d (PE%d, addr=%d)\n", msg, src_pe, addr);
         bus->handlers[msg](bus, addr, src_pe);
-    else
+    } else {
+        // Este log es agregado solo para validación
         printf("[BUS] ⚠️ No hay handler definido para la señal %d\n", msg);
+    }
 
     pthread_mutex_unlock(&bus_lock);
 }

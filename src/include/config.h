@@ -5,6 +5,7 @@
 #define SETS 16
 #define WAYS 2
 #define BLOCK_SIZE 4 // 4 doubles (32 bytes)
+#define LINE_SIZE (BLOCK_SIZE * sizeof(double)) // Tamaño de una línea de caché en bytes
 #define MEM_SIZE 512
 
 #endif
