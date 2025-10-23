@@ -1,11 +1,12 @@
+// handlers/handlers.c
 #include "handlers.h"
 #include "../memory/memory.h"
 #include "../cache/cache.h"
+#include "../include/config.h"
 #include <stdio.h>
+#include <stdlib.h>  // Asegúrate de incluir este encabezado
+#include "../mesi/mesi.h"
 
-// ================
-// REGISTRO DE HANDLERS
-// ================
 void bus_register_handlers(Bus* bus) {
     bus->handlers[BUS_RD]   = handle_busrd;
     bus->handlers[BUS_RDX]  = handle_busrdx;
@@ -13,85 +14,130 @@ void bus_register_handlers(Bus* bus) {
     bus->handlers[BUS_WB]   = handle_buswb;
 }
 
-// ================
-// HANDLER: BusRd
-// ================
+static int compute_block(int addr) { return addr / DOUBLES_PER_LINE; }
+static int compute_set(int block) { return block % SETS; }
+
+/* helper: devuelve la dirección base (física) del segmento */
+static int seg_base_addr(Segment seg) {
+    switch (seg) {
+        case VECTOR_A: return VECTOR_A_ADDR;
+        case VECTOR_B: return VECTOR_B_ADDR;
+        case SUMS:     return SUMS_ADDR;
+        case DONE:     return DONE_ADDR;
+        case RESULT:   return RESULT_ADDR;
+        default:       return 0;
+    }
+}
+
 void handle_busrd(Bus* bus, int addr, int src_pe) {
-    printf("[BUS] Ejecutando handler BusRd (PE%d, addr=%d)\n", src_pe, addr);
-    int found = 0;
-
-    // Propagar estado Shared a otras cachés
+    printf("[BUS] Handler BusRd (PE%d, addr=%d)\n", src_pe, addr);
+    bus->last_shared = 0;
+    int block = compute_block(addr);
+    /* int set_index removed because no se usa */
     for (int i = 0; i < NUM_PES; i++) {
-        if (i == src_pe) continue; // No modificar la caché del PE que envió la señal
+        if (i == src_pe) continue;
         CacheLine* line = cache_get_line(bus->caches[i], addr);
-        if (line) {
-            found = 1;
+        if (line && line->valid) {
+            bus->last_shared = 1;
             if (line->state == M) {
-                // Escribir el valor en memoria principal si está en estado Modified
-                mem_write(addr, line->data[0]);
-                line->state = S; // Cambiar a Shared
-                printf("[BUS] Transición de estado en PE%d: M -> S para addr=%d\n", i, addr);
-            } else if (line->state == E) {
-                // Cambiar a Shared si está en estado Exclusive
+                unsigned long block_num = line->tag * SETS + compute_set(block);
+                int base = (int)(block_num * DOUBLES_PER_LINE);
+                for (unsigned long off = 0; off < DOUBLES_PER_LINE; off++) {
+                    int phys = base + (int)off;
+                    Segment seg = addr_to_segment(phys);
+                    int seg_base = seg_base_addr(seg);
+                    int offset_in_seg = phys - seg_base;
+                    if (offset_in_seg < 0) {
+                        fprintf(stderr, "Error: Escritura fuera de los límites en handle_busrd (base=%d, offset=%lu)\n", base, off);
+                        exit(EXIT_FAILURE);
+                    }
+                    mem_write(seg, offset_in_seg, line->data[off]);
+                }
+                line->dirty = 0;
                 line->state = S;
-                printf("[BUS] Transición de estado en PE%d: E -> S para addr=%d\n", i, addr);
+                printf("[BUS] PE%d: M -> S y writeback addr(base)=%d\n", i, base);
+            } else if (line->state == E) {
+                line->state = S;
+                printf("[BUS] PE%d: E -> S addr=%d\n", i, addr);
             }
         }
     }
-
-    // Si ninguna caché tiene la línea, leer desde memoria principal
-    if (!found) {
-        printf("[BUS] Línea no encontrada → leyendo de memoria\n");
-        mem_read(addr);
+    if (!bus->last_shared) {
+        printf("[BUS] Ninguna cache tenía la línea; responder desde memoria\n");
     }
 }
 
-// ================
-// HANDLER: BusRdX
-// ================
 void handle_busrdx(Bus* bus, int addr, int src_pe) {
-    printf("[BUS] Ejecutando handler BusRdX (PE%d, addr=%d)\n", src_pe, addr);
+    printf("[BUS] Handler BusRdX (PE%d, addr=%d)\n", src_pe, addr);
+    bus->last_shared = 0;
+    int block = compute_block(addr);
 
     for (int i = 0; i < NUM_PES; i++) {
-        if (i != src_pe) {
-            CacheLine* line = cache_get_line(bus->caches[i], addr);
-            if (line && line->valid) {
-                printf("[BUS] Invalidando línea en PE%d para addr=%d\n", i, addr);
-                line->state = I; // Cambiar a Invalid
-            }
-        }
-    }
-}
-
-// ================
-// HANDLER: BusUpgr
-// ================
-void handle_busupgr(Bus* bus, int addr, int src_pe) {
-    printf("[BUS] Ejecutando handler BusUpgr (PE%d, addr=%d)\n", src_pe, addr);
-
-    // Invalidar líneas en otras cachés
-    for (int i = 0; i < NUM_PES; i++) {
-        if (i == src_pe) continue; // No modificar la caché del PE que envió la señal
+        if (i == src_pe) continue;
         CacheLine* line = cache_get_line(bus->caches[i], addr);
-        if (line) {
-            line->state = I; // Cambiar a Invalid
-            printf("[BUS] Transición de estado en PE%d: %s -> I para addr=%d\n",
-                   i, mesi_state_to_str(line->state), addr);
+        if (line && line->valid) {
+            bus->last_shared = 1;
+            if (line->state == M) {
+                unsigned long block_num = line->tag * SETS + compute_set(block);
+                int base = (int)(block_num * DOUBLES_PER_LINE);
+                for (unsigned long off = 0; off < DOUBLES_PER_LINE; off++) {
+                    int phys = base + (int)off;
+                    Segment seg = addr_to_segment(phys);
+                    int seg_base = seg_base_addr(seg);
+                    int offset_in_seg = phys - seg_base;
+                    if (offset_in_seg < 0) {
+                        fprintf(stderr, "Error: Escritura fuera de los límites en handle_busrdx (base=%d, offset=%lu)\n", base, off);
+                        exit(EXIT_FAILURE);
+                    }
+                    mem_write(seg, offset_in_seg, line->data[off]);
+                }
+                line->dirty = 0;
+                printf("[BUS] PE%d: writeback por BusRdX (base=%d)\n", i, base);
+            }
+            line->state = I;
+            line->valid = 0;
+            bus->caches[i]->invalidations_received++;
+            printf("[BUS] PE%d: invalidada addr=%d\n", i, addr);
         }
     }
 }
 
-// ================
-// HANDLER: BusWB
-// ================
-void handle_buswb(Bus* bus, int addr, int src_pe) {
-    printf("[BUS] Ejecutando handler BusWB (PE%d, addr=%d)\n", src_pe, addr);
+void handle_busupgr(Bus* bus, int addr, int src_pe) {
+    printf("[BUS] Handler BusUpgr (PE%d, addr=%d)\n", src_pe, addr);
+    int block = compute_block(addr);
 
-    // Escribir el valor en memoria principal si está en estado Modified
+    for (int i = 0; i < NUM_PES; i++) {
+        if (i == src_pe) continue;
+        CacheLine* line = cache_get_line(bus->caches[i], addr);
+        if (line && line->valid) {
+            printf("[BUS] PE%d: %s -> I para addr=%d\n", i, mesi_state_to_str(line->state), addr);
+            line->state = I;
+            line->valid = 0;
+            bus->caches[i]->invalidations_received++;
+        }
+    }
+}
+
+void handle_buswb(Bus* bus, int addr, int src_pe) {
+    printf("[BUS] Handler BusWB (PE%d, addr=%d)\n", src_pe, addr);
     CacheLine* line = cache_get_line(bus->caches[src_pe], addr);
     if (line && line->state == M) {
-        mem_write(addr, line->data[0]);
-        line->state = S; // Cambiar a Shared
-        printf("[BUS] Transición de estado en PE%d: M -> S para addr=%d\n", src_pe, addr);
+        int block = compute_block(addr);
+        unsigned long block_num = line->tag * SETS + compute_set(block);
+        int base = (int)(block_num * DOUBLES_PER_LINE);
+        for (unsigned long off = 0; off < DOUBLES_PER_LINE; off++) {
+            int phys = base + (int)off;
+            Segment seg = addr_to_segment(phys);
+            int seg_base = seg_base_addr(seg);
+            int offset_in_seg = phys - seg_base;
+            if (offset_in_seg < 0) {
+                fprintf(stderr, "Error: Escritura fuera de los límites en handle_buswb (base=%d, offset=%lu)\n", base, off);
+                exit(EXIT_FAILURE);
+            }
+            mem_write(seg, offset_in_seg, line->data[off]);
+        }
+        line->dirty = 0;
+        line->state = S;
+        printf("[BUS] PE%d: M -> S luego de WB base=%d\n", src_pe, base);
     }
 }
