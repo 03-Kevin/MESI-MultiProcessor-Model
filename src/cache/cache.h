@@ -51,4 +51,9 @@ void cache_flush(Cache *cache);
 
 void cache_print_metrics(Cache *cache, int pe_id);
 
+// cache.h
+void cache_record_transition(Cache *cache, MESI_State st);
+void cache_increment_writebacks(Cache *cache);
+
+
 #endif // CACHE_H

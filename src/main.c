@@ -168,6 +168,7 @@ int main()
 
     // Cerrar el archivo de salida
     fclose(output_file);
-
+    /* agregado para probar el protocolo mesi */
+    bus_destroy(&bus);
     return 0;
 }

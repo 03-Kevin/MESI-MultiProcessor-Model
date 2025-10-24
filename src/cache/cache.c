@@ -143,10 +143,12 @@ static void record_transition(Cache* cache, MESI_State st) {
     if (st >= 0 && st <= 3) cache->transitions[st]++;
 }
 
+
 /* ------------------ Operaciones públicas ------------------ */
 
 double cache_read(Cache *cache, int addr, int pe_id) {
     if (!cache) return 0.0;
+
     pthread_mutex_lock(&cache->lock);
     cache->total_reads++;
 
@@ -156,6 +158,7 @@ double cache_read(Cache *cache, int addr, int pe_id) {
     int offset = compute_offset(addr);
     CacheSet *set = &cache->sets[set_index];
 
+    /* Buscar hit */
     for (int i = 0; i < WAYS; i++) {
         CacheLine *line = &set->lines[i];
         if (line->valid && line->tag == tag) {
@@ -169,9 +172,20 @@ double cache_read(Cache *cache, int addr, int pe_id) {
         }
     }
 
+    /* MISS: registrar, liberar lock y hacer broadcast */
     cache->read_misses++;
     printf("[PE%d] CACHE MISS: Addr=%d Set=%d -> BusRd\n", pe_id, addr, set_index);
+
+    /* Liberar lock antes de emitir la petición al bus (evita deadlocks) */
+    pthread_mutex_unlock(&cache->lock);
+
     bus_broadcast(cache->bus, BUS_RD, addr, pe_id);
+
+    /* Volver a tomar lock para completar la carga de la línea */
+    pthread_mutex_lock(&cache->lock);
+
+    /* Recomputar set (puede haber cambiado por otras acciones) */
+    set = &cache->sets[set_index];
 
     int way;
     find_line_to_replace(set, cache, set_index, &way);
@@ -217,8 +231,46 @@ void cache_write(Cache *cache, int addr, double value, int pe_id) {
     CacheLine *line = cache_get_line(cache, addr);
     if (line) {
         cache->write_hits++;
+        /* Caso hit */
         if (line->state == S) {
+            /* Necesitamos BusUpgr: liberar lock, emitir, y luego reacceder con lock */
+            pthread_mutex_unlock(&cache->lock);
             bus_broadcast(cache->bus, BUS_UPGR, addr, pe_id);
+            pthread_mutex_lock(&cache->lock);
+
+            /* Revalidar que la línea sigue ahí (si no, caer al manejo de miss) */
+            line = cache_get_line(cache, addr);
+            if (!line || !line->valid || line->tag != tag) {
+                /* Caer en camino de miss: no hay línea válida tras BusUpgr */
+                cache->write_misses++;
+                pthread_mutex_unlock(&cache->lock);
+                /* Emitir BusRdX para obtener la línea en M */
+                bus_broadcast(cache->bus, BUS_RDX, addr, pe_id);
+                pthread_mutex_lock(&cache->lock);
+                /* Reemplazar e inicializar como en miss */
+                int way;
+                find_line_to_replace(set, cache, set_index, &way);
+                line = &set->lines[way];
+                line->valid = 1;
+                line->tag = tag;
+                line->state = M;
+                record_transition(cache, M);
+                line->dirty = 0;
+                int base = reconstruct_base(tag, set_index);
+                for (unsigned long o = 0; o < DOUBLES_PER_LINE; o++) {
+                    int phys = base + (int)o;
+                    Segment seg = addr_to_segment(phys);
+                    int seg_base = seg_base_addr(seg);
+                    int offset_in_seg = phys - seg_base;
+                    line->data[o] = mem_read(seg, offset_in_seg);
+                }
+                line->data[offset] = value;
+                line->dirty = 1;
+                update_lru(set, way);
+                pthread_mutex_unlock(&cache->lock);
+                return;
+            }
+            /* Si la línea sigue válida, la promovemos a M */
             line->state = M;
             record_transition(cache, M);
         } else if (line->state == E) {
@@ -228,33 +280,41 @@ void cache_write(Cache *cache, int addr, double value, int pe_id) {
         line->data[offset] = value;
         line->dirty = 1;
         update_lru(set, (int)(line - set->lines));
-    } else {
-        cache->write_misses++;
-        bus_broadcast(cache->bus, BUS_RDX, addr, pe_id);
-
-        int way;
-        find_line_to_replace(set, cache, set_index, &way);
-        line = &set->lines[way];
-        line->valid = 1;
-        line->tag = tag;
-        line->state = M;
-        record_transition(cache, M);
-        line->dirty = 0;
-
-        int base = reconstruct_base(tag, set_index);
-        for (unsigned long o = 0; o < DOUBLES_PER_LINE; o++) {
-            int phys = base + (int)o;
-            Segment seg = addr_to_segment(phys);
-            int seg_base = seg_base_addr(seg);
-            int offset_in_seg = phys - seg_base;
-            line->data[o] = mem_read(seg, offset_in_seg);
-        }
-
-        line->data[offset] = value;
-        line->dirty = 1;
-        update_lru(set, way);
+        pthread_mutex_unlock(&cache->lock);
+        return;
     }
 
+    /* Miss de escritura */
+    cache->write_misses++;
+    printf("[PE%d] CACHE WRITE MISS: Addr=%d Set=%d -> BusRdX\n", pe_id, addr, set_index);
+
+    /* liberar lock antes de emitir BusRdX */
+    pthread_mutex_unlock(&cache->lock);
+    bus_broadcast(cache->bus, BUS_RDX, addr, pe_id);
+
+    /* volver a tomar lock y completar la línea en estado M */
+    pthread_mutex_lock(&cache->lock);
+    int way;
+    find_line_to_replace(set, cache, set_index, &way);
+    line = &set->lines[way];
+    line->valid = 1;
+    line->tag = tag;
+    line->state = M;
+    record_transition(cache, M);
+    line->dirty = 0;
+
+    int base = reconstruct_base(tag, set_index);
+    for (unsigned long o = 0; o < DOUBLES_PER_LINE; o++) {
+        int phys = base + (int)o;
+        Segment seg = addr_to_segment(phys);
+        int seg_base = seg_base_addr(seg);
+        int offset_in_seg = phys - seg_base;
+        line->data[o] = mem_read(seg, offset_in_seg);
+    }
+
+    line->data[offset] = value;
+    line->dirty = 1;
+    update_lru(set, way);
     pthread_mutex_unlock(&cache->lock);
 }
 /* ------------------ Flush / Debug / Métricas ------------------ */
@@ -322,4 +382,17 @@ void debug_print_cache_states(Cache *caches, int num_pes) {
             }
         }
     }
+}
+void cache_record_transition(Cache *cache, MESI_State st) {
+    if (!cache) return;
+    pthread_mutex_lock(&cache->lock);
+    if (st >= 0 && st <= 3) cache->transitions[st]++;
+    pthread_mutex_unlock(&cache->lock);
+}
+
+void cache_increment_writebacks(Cache *cache) {
+    if (!cache) return;
+    pthread_mutex_lock(&cache->lock);
+    cache->writebacks++;
+    pthread_mutex_unlock(&cache->lock);
 }
