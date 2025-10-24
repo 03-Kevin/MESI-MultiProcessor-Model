@@ -11,7 +11,7 @@
 
 // ================= Memoria =================
 #define MEM_SIZE 512
-#define VECTOR_SIZE 251
+#define VECTOR_SIZE 16
 
 // ================= Segmentos =================
 typedef enum {

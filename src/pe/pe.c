@@ -8,6 +8,15 @@
 #include "../include/config.h"  // VECTOR_SIZE, VECTOR_A_ADDR, VECTOR_B_ADDR, SUMS_ADDR, NUM_PES
 #include <errno.h>
 
+#ifdef STEP_CONTROL_AVAILABLE
+#include "../step_control/step_control.h"
+#else
+/* Si no tienes los archivos de step_control, define stubs para compilar sin stepping */
+static inline void step_control_maybe_pause(long c) { (void)c; }
+static inline void step_control_init(int a, int b) { (void)a; (void)b; }
+static inline void step_control_shutdown(void) { }
+#endif
+
 #ifndef MAX_REGS
 #define MAX_REGS 8
 #endif
@@ -82,6 +91,9 @@ void *pe_run(void *arg) {
         return NULL;
     }
 
+    // Contador de instrucciones ejecutadas por este PE (para stepping)
+    long instr_count = 0;
+
     // Ejecutar programa
     int pc = 0;
     while (pc < program.num_instructions) {
@@ -91,6 +103,8 @@ void *pe_run(void *arg) {
                pe_id, pc, instr->opcode,
                instr->args[0], instr->args[1], instr->args[2],
                pe->regs[0], pe->regs[1], pe->regs[3], pe->regs[4]);
+
+        int jumped = 0; // indica si la instrucción cambió el PC
 
         if (strcmp(instr->opcode, "LOAD") == 0) {
             int dest = instr->args[0];
@@ -160,7 +174,7 @@ void *pe_run(void *arg) {
             if (JNZ(pe, r)) {
                 // salto
                 pc = target;
-                continue;
+                jumped = 1;
             }
         }
         else {
@@ -168,7 +182,12 @@ void *pe_run(void *arg) {
             return NULL;
         }
 
-        pc++;
+        // Cada instrucción ejecutada incrementa el contador y puede ser punto de pausa
+        instr_count++;
+        step_control_maybe_pause(instr_count);
+
+        // Actualizar PC (si la instrucción no realizó salto, avanzamos normalmente)
+        if (!jumped) pc++;
     }
 
     printf("[PE%d] Fin de ejecución\n", pe_id);

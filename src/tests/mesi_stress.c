@@ -1,9 +1,16 @@
 // tests/mesi_stress.c
+// Versión del stress test que vuelca stdout/stderr a un fichero:
+//   ./mesi_stress run01   -> ms_run01.txt
+//   ./mesi_stress          -> ms_YYYYMMDD-HHMMSS.txt
+//
+// Compilar / ejecutar como antes (se recomienda usar la regla `make mesi_stress`).
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <time.h>
+#include <string.h>
+#include <errno.h>
 
 #include "include/config.h"
 #include "memory/memory.h"
@@ -53,9 +60,18 @@ void *stress_thread(void *arg) {
 int main(int argc, char **argv) {
     // === Identificador de salida ===
     time_t now = time(NULL);
-    struct tm *tm_info = localtime(&now);
+    struct tm tm_storage;
+    struct tm *tm_info = localtime_r(&now, &tm_storage);
+    if (!tm_info) {
+        perror("localtime_r");
+        return EXIT_FAILURE;
+    }
+
     char timestamp[32];
-    strftime(timestamp, sizeof(timestamp), "%Y%m%d-%H%M%S", tm_info);
+    if (strftime(timestamp, sizeof(timestamp), "%Y%m%d-%H%M%S", tm_info) == 0) {
+        strncpy(timestamp, "unknown", sizeof(timestamp));
+        timestamp[sizeof(timestamp)-1] = '\0';
+    }
 
     char filename[128];
     if (argc > 1) {
@@ -66,13 +82,23 @@ int main(int argc, char **argv) {
 
     FILE *log = fopen(filename, "w");
     if (!log) {
-        perror("fopen");
+        fprintf(stderr, "fopen(%s) failed: %s\n", filename, strerror(errno));
         exit(EXIT_FAILURE);
     }
 
-    // Redirigir stdout y stderr al archivo
-    dup2(fileno(log), STDOUT_FILENO);
-    dup2(fileno(log), STDERR_FILENO);
+    /* Redirigir stdout y stderr al archivo */
+    if (dup2(fileno(log), STDOUT_FILENO) < 0) {
+        perror("dup2 stdout");
+        fclose(log);
+        exit(EXIT_FAILURE);
+    }
+    if (dup2(fileno(log), STDERR_FILENO) < 0) {
+        perror("dup2 stderr");
+        fclose(log);
+        exit(EXIT_FAILURE);
+    }
+
+    /* Opcional: desactivar bufferado para ver logs inmediatamente */
     setvbuf(stdout, NULL, _IONBF, 0);
 
     printf("[STRESS] Logging en %s\n", filename);
@@ -80,7 +106,7 @@ int main(int argc, char **argv) {
 
     mem_init();
 
-    // Initialize some data in VECTOR_A/B
+    // Inicializar algunos datos en VECTOR_A/B
     for (int i = 0; i < VECTOR_SIZE; ++i) {
         mem_write(VECTOR_A, i, (double)(i + 1));
         mem_write(VECTOR_B, i, (double)(i + 1000));
@@ -103,6 +129,7 @@ int main(int argc, char **argv) {
         args[i].cache = &caches[i];
         if (pthread_create(&threads[i], NULL, stress_thread, &args[i]) != 0) {
             perror("pthread_create");
+            bus_destroy(&bus);
             exit(EXIT_FAILURE);
         }
     }
@@ -121,11 +148,13 @@ int main(int argc, char **argv) {
     printf("\n[STRESS] Estados finales de caches (debug):\n");
     debug_print_bus_cache_states(&bus);
 
+    /* Recomendado: detener dispatcher limpiamente */
     bus_destroy(&bus);
 
     printf("[STRESS] Fin.\n");
 
+    /* Cerrar FILE*; stdout/stderr siguen apuntando al descriptor duplicado. */
     fclose(log);
+
     return 0;
 }
-

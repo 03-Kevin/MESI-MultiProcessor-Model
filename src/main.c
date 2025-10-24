@@ -1,3 +1,4 @@
+// src/main.c
 #include "include/config.h"
 #include "pe/pe.h"
 #include "bus/bus.h"
@@ -6,6 +7,16 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <time.h>
+#include <string.h>
+#include <stdlib.h>
+
+#ifdef STEP_CONTROL_AVAILABLE
+#include "step_control/step_control.h"
+#else
+/* stubs si no existe módulo de stepping */
+static inline void step_control_init(int a, int b) { (void)a; (void)b; }
+static inline void step_control_shutdown(void) { (void)0; }
+#endif
 
 // Función para imprimir las métricas de las cachés
 void print_cache_metrics(Cache *caches)
@@ -27,32 +38,80 @@ void print_cache_metrics(Cache *caches)
 }
 
 // Función para cargar vectores en memoria con alineación
-void load_vectors(double *memory, double *vector_a, double *vector_b, size_t vector_size)
+void load_vectors(double *vector_a, double *vector_b, size_t vector_size)
 {
-    // Cargar vector A
-    mem_load_data(memory, VECTOR_A, 0, vector_a, vector_size, ALIGNMENT);
-
-    // Cargar vector B
-    mem_load_data(memory, VECTOR_B, 0, vector_b, vector_size, ALIGNMENT);
+    // Llamada según la nueva firma de mem_load_data:
+    // mem_load_data(Segment seg, int offset, const double *data, size_t count, int alignment)
+    if (mem_load_data(VECTOR_A, 0, vector_a, vector_size, ALIGNMENT) != 0) {
+        fprintf(stderr, "[MAIN] Error cargando VECTOR_A con mem_load_data\n");
+        exit(EXIT_FAILURE);
+    }
+    if (mem_load_data(VECTOR_B, 0, vector_b, vector_size, ALIGNMENT) != 0) {
+        fprintf(stderr, "[MAIN] Error cargando VECTOR_B con mem_load_data\n");
+        exit(EXIT_FAILURE);
+    }
 
     printf("[MAIN] Vectores A y B cargados en memoria con alineación.\n");
 }
 
-int main()
+int main(int argc, char **argv)
 {
-    // Crear un nombre único para el archivo de salida
-    char filename[64];
-    time_t now = time(NULL);
-    strftime(filename, sizeof(filename), "%Y%m%d_%H%M%S_output.txt", localtime(&now));
+    // parseo simple: --step or --step=N and optional output id as first non-option
+    int step_interval = 0;
+    int arg_idx = 1;
+    char out_id[64] = {0};
 
-    // Redirigir stdout y stderr al archivo
-    FILE *output_file = freopen(filename, "w", stdout);
-    if (!output_file)
-    {
-        perror("Error al abrir el archivo de salida");
-        return 1;
+    for (int i = 1; i < argc; ++i) {
+        if (strncmp(argv[i], "--step", 6) == 0) {
+            char *eq = strchr(argv[i], '=');
+            if (eq) step_interval = atoi(eq + 1);
+            else step_interval = 1;
+        } else if (argv[i][0] == '-') {
+            // ignorar otras opciones por ahora
+        } else {
+            // primer argumento no-opción -> id del run (ms_<id>.txt)
+            if (out_id[0] == '\0') strncpy(out_id, argv[i], sizeof(out_id)-1);
+            arg_idx = i+1;
+        }
     }
-    freopen(filename, "a", stderr);
+
+    // Crear un nombre único para el archivo de salida
+    char filename[128];
+    if (out_id[0] != '\0') {
+        snprintf(filename, sizeof(filename), "ms_%s.txt", out_id);
+    } else {
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+        char timestamp[64];
+        strftime(timestamp, sizeof(timestamp), "%Y%m%d-%H%M%S", tm_info);
+        snprintf(filename, sizeof(filename), "ms_%s.txt", timestamp);
+    }
+
+    // Redirigir stdout y stderr al archivo sólo si NO estamos en modo stepping interactivo
+    FILE *output_file = NULL;
+    if (step_interval == 0) {
+        output_file = freopen(filename, "w", stdout);
+        if (!output_file)
+        {
+            perror("Error al abrir el archivo de salida");
+            return 1;
+        }
+        freopen(filename, "a", stderr);
+        setvbuf(stdout, NULL, _IONBF, 0);
+        printf("[MAIN] Logging en %s (salida redirigida)\n", filename);
+    } else {
+        // En modo stepping queremos ver prompts en pantalla
+        printf("[MAIN] Stepping activo (interval=%d). No se redirige stdout. Logs se imprimirán en terminal.\n", step_interval);
+    }
+
+    // inicializar stepping si se pidió (hacerlo después de decidir redirección)
+    if (step_interval > 0) {
+#ifdef STEP_CONTROL_AVAILABLE
+        step_control_init(1, step_interval); // enabled = 1, interval = step_interval
+#else
+        fprintf(stderr, "[MAIN] --step solicitado pero STEP_CONTROL no está disponible en build.\n");
+#endif
+    }
 
     mem_init();
     printf("[MAIN] Memoria inicializada.\n");
@@ -76,9 +135,9 @@ int main()
     }
 
     // Cargar los vectores en la memoria principal
-    load_vectors(main_memory, vector_a, vector_b, VECTOR_SIZE);
+    load_vectors(vector_a, vector_b, VECTOR_SIZE);
 
-    // Verificar los valores inicializados
+    // Verificar los valores inicializados (debug)
     for (int i = 0; i < VECTOR_SIZE; i++)
     {
         printf("A[%d] = %f, B[%d] = %f\n", i, mem_read(VECTOR_A, i), i, mem_read(VECTOR_B, i));
@@ -106,7 +165,10 @@ int main()
     {
         pes[i].id = i;
         pes[i].cache = &caches[i];
-        pthread_create(&threads[i], NULL, pe_run, &pes[i]);
+        if (pthread_create(&threads[i], NULL, pe_run, &pes[i]) != 0) {
+            perror("pthread_create");
+            exit(EXIT_FAILURE);
+        }
         printf("[MAIN] PE%d ejecutándose.\n", i);
     }
 
@@ -166,9 +228,14 @@ int main()
 
     printf("[MAIN] Fin del programa.\n");
 
-    // Cerrar el archivo de salida
-    fclose(output_file);
+    // Cerrar el archivo de salida si fue abierto
+    if (output_file) fclose(output_file);
+
     /* agregado para probar el protocolo mesi */
     bus_destroy(&bus);
+
+    // Shutdown step control si se inició
+    step_control_shutdown();
+
     return 0;
 }

@@ -1,5 +1,6 @@
 #ifndef MEMORY_H
 #define MEMORY_H
+#include <stddef.h>
 
 #include "include/config.h"
 #include <pthread.h>
@@ -22,8 +23,8 @@ void mem_write(Segment seg, int offset, double value);
 // Convierte una dirección global en un segmento de memoria
 Segment addr_to_segment(int addr);
 
-// Carga datos en memoria con alineación
-void mem_load_data(double *memory, size_t segment, size_t base_offset, double *array, size_t size, size_t alignment);
-
+// Carga datos en memoria con alineación (definición pública unificada)
+// Devuelve 0 en éxito, -1 en error.
+int mem_load_data(Segment seg, int offset, const double *data, size_t count, int alignment);
 
 #endif // MEMORY_H

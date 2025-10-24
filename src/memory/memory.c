@@ -4,6 +4,7 @@
 #include <string.h>
 #include "include/config.h"
 #include <stdlib.h>
+#include <pthread.h>
 
 // Definición de la memoria principal y el mutex
 double main_memory[MEM_SIZE];
@@ -26,6 +27,18 @@ size_t segment_bases[NUM_SEGMENTS] = {
     DONE_ADDR,
     RESULT_ADDR
 };
+
+/* helper local: devuelve capacidad (nº de doubles) del segmento */
+static int segment_capacity_in_doubles(Segment seg) {
+    switch (seg) {
+        case VECTOR_A: return VECTOR_B_ADDR - VECTOR_A_ADDR;
+        case VECTOR_B: return SUMS_ADDR - VECTOR_B_ADDR;
+        case SUMS:     return DONE_ADDR - SUMS_ADDR;
+        case DONE:     return RESULT_ADDR - DONE_ADDR;
+        case RESULT:   return MEM_SIZE - RESULT_ADDR;
+        default:       return 0;
+    }
+}
 
 // Inicializa la memoria principal y el mutex
 void mem_init() {
@@ -71,7 +84,6 @@ Segment addr_to_segment(int addr) {
     if ((size_t)addr >= segment_bases[VECTOR_A] && (size_t)addr < segment_bases[VECTOR_A] + segment_sizes[VECTOR_A])
         return VECTOR_A;
 
-    // Fallback seguro (no debería pasar)
     fprintf(stderr, "addr_to_segment: no se pudo mapear addr=%d a ningún segmento\n", addr);
     exit(EXIT_FAILURE);
 }
@@ -82,7 +94,7 @@ double mem_read(Segment seg, int offset) {
     pthread_mutex_lock(&mem_lock);
     double val = main_memory[addr];
     pthread_mutex_unlock(&mem_lock);
-    printf("[DEBUG] Leyendo de memoria: Segmento=%d, Offset=%d, Addr=%zu, Valor=%f\n", seg, offset, addr, val);
+    printf("[DEBUG] Leyendo en memoria: Segmento=%d, Offset=%d, Addr=%zu, Valor=%f\n", seg, offset, addr, val);
     return val;
 }
 
@@ -95,32 +107,49 @@ void mem_write(Segment seg, int offset, double value) {
     printf("[DEBUG] Escribiendo en memoria: Segmento=%d, Offset=%d, Addr=%zu, Valor=%f\n", seg, offset, addr, value);
 }
 
-// Carga datos en memoria con alineación (segment = enum Segment)
-void mem_load_data(double *memory, size_t segment, size_t base_offset, double *array, size_t size, size_t alignment) {
-    if (segment >= NUM_SEGMENTS) {
-        fprintf(stderr, "mem_load_data: segmento inválido %zu\n", segment);
-        exit(EXIT_FAILURE);
+/*
+ * mem_load_data
+ *  - seg: segmento destino (enum Segment)
+ *  - offset: offset deseado dentro del segmento (en número de doubles)
+ *  - data: puntero a datos fuente (double*)
+ *  - count: número de doubles a copiar
+ *  - alignment: alineamiento deseado en "nº de doubles" (>=1).
+ *
+ * Devuelve 0 en éxito, -1 en error (p. ej. overflow, parámetros inválidos).
+ */
+int mem_load_data(Segment seg, int offset, const double *data, size_t count, int alignment) {
+    if (!data) {
+        fprintf(stderr, "[mem_load_data] puntero data NULL\n");
+        return -1;
+    }
+    if (count == 0) return 0;
+    if (alignment <= 0) alignment = 1;
+
+    int seg_capacity = segment_capacity_in_doubles(seg);
+    if (seg_capacity <= 0) {
+        fprintf(stderr, "[mem_load_data] segmento inválido o tamaño 0\n");
+        return -1;
     }
 
-    // calcular offset alineado *dentro del segmento*
-    size_t aligned_base = (base_offset + alignment - 1) & ~(alignment - 1);
-
-    // asegurar que la copia cabe en el segmento
-    if (aligned_base + size > segment_sizes[segment]) {
-        fprintf(stderr, "Error: Carga de datos fuera del segmento %zu (aligned_base=%zu size=%zu seg_size=%zu).\n",
-                segment, aligned_base, size, segment_sizes[segment]);
-        exit(EXIT_FAILURE);
+    if (offset < 0) {
+        fprintf(stderr, "[mem_load_data] offset negativo solicitado: %d\n", offset);
+        return -1;
     }
 
-    // dirección física de inicio
-    size_t phys_base = segment_bases[segment] + aligned_base;
-    if (phys_base + size > MEM_SIZE) {
-        fprintf(stderr, "Error: Carga de datos fuera de los límites físicos (phys_base=%zu size=%zu MEM_SIZE=%d).\n",
-                phys_base, size, MEM_SIZE);
-        exit(EXIT_FAILURE);
+    /* calcular offset alineado */
+    int aligned_offset = ((offset + alignment - 1) / alignment) * alignment;
+    if ((size_t)aligned_offset + count > (size_t)seg_capacity) {
+        fprintf(stderr, "[mem_load_data] overflow: aligned_offset=%d + count=%zu > seg_capacity=%d\n",
+                aligned_offset, count, seg_capacity);
+        return -1;
     }
 
-    memcpy(&memory[phys_base], array, size * sizeof(double));
-    printf("[MEMORY] Datos cargados en segmento %zu, offset alineado %zu (phys %zu), tamaño %zu, alineación %zu\n",
-           segment, aligned_base, phys_base, size, alignment);
+    for (size_t i = 0; i < count; ++i) {
+        mem_write(seg, aligned_offset + (int)i, data[i]);
+    }
+
+    printf("[mem_load_data] seg=%d offset_req=%d aligned_offset=%d count=%zu alignment(doubles)=%d\n",
+           seg, offset, aligned_offset, count, alignment);
+
+    return 0;
 }
