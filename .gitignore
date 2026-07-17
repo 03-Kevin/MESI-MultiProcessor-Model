@@ -1,3 +1,7 @@
 .vscode/
 obj/
 mp_mesi
+mesi_stress
+*.txt
+!Docs/*.txt
+*.zip

@@ -9,10 +9,6 @@
 #include <pthread.h>
 #include <string.h>
 
-// forward
-static int find_line_to_replace(CacheSet *set, Cache *cache, int set_index, int *way_out);
-static void record_transition(Cache* cache, MESI_State st);
-
 /* ------------------ Helpers de mapeo ------------------ */
 
 static int compute_block(int addr) {
@@ -67,26 +63,16 @@ void cache_init(Cache *cache) {
     for (int i = 0; i < 4; i++) cache->transitions[i] = 0;
 }
 
-/* ------------------ Acceso y reemplazo ------------------ */
+/* ------------------ Reemplazo / writeback ------------------ */
 
-CacheLine* cache_get_line(Cache *cache, int addr) {
-    int block = compute_block(addr);
-    int set_index = compute_set(block);
-    unsigned long tag = compute_tag(block);
-    CacheSet *set = &cache->sets[set_index];
-
-    for (int i = 0; i < WAYS; i++) {
-        if (set->lines[i].valid && set->lines[i].tag == tag) {
-            return &set->lines[i];
-        }
-    }
-    return NULL;
-}
-
+/* writeback_line: *DEBE* llamarse con cache->lock ya tomado.
+   Escribimos todos los offsets del block a memoria y dejamos la línea invalidada
+   (ponerla en S podría confundir si el caller la invalidará inmediatamente). */
 static void writeback_line(Cache *cache, CacheLine *line, int set_index) {
     if (!line || !line->valid) return;
     if (line->dirty || line->state == M) {
         int base = reconstruct_base(line->tag, set_index);
+        printf("[CACHE] Writeback (tag=%lu set=%d base=%d) offsets:\n", line->tag, set_index, base);
         for (unsigned long off = 0; off < DOUBLES_PER_LINE; off++) {
             int phys = base + (int)off;
             Segment seg = addr_to_segment(phys);
@@ -96,11 +82,16 @@ static void writeback_line(Cache *cache, CacheLine *line, int set_index) {
                 fprintf(stderr, "[CACHE] Error: offset_in_seg negativo en writeback (phys=%d seg_base=%d)\n", phys, seg_base);
                 exit(EXIT_FAILURE);
             }
-            mem_write(seg, offset_in_seg, line->data[off]);
+            double v = line->data[off];
+            mem_write(seg, offset_in_seg, v);
+            /* debug line per offset: */
+            printf("    -> Addr=%d (seg=%d off=%d) = %f\n", phys, seg, offset_in_seg, v);
         }
         cache->writebacks++;
         line->dirty = 0;
-        printf("[CACHE] Writeback de block (tag=%lu set=%d) (base addr %d)\n", line->tag, set_index, base);
+        /* tras escribir de vuelta, dejar en invalid (caller normalmente invalidará) */
+        line->state = I;
+        printf("[CACHE] Writeback complete for block (tag=%lu set=%d)\n", line->tag, set_index);
     }
 }
 
@@ -120,11 +111,15 @@ static int find_line_to_replace(CacheSet *set, Cache *cache, int set_index, int 
     }
 
     *way_out = lru_index;
+    /* writeback del victim (llama con lock tomado por el caller) */
     writeback_line(cache, &set->lines[lru_index], set_index);
+
+    /* invalidate victim slot */
     set->lines[lru_index].valid = 0;
     set->lines[lru_index].dirty = 0;
     set->lines[lru_index].state = I;
     set->lines[lru_index].age = 0;
+    set->lines[lru_index].tag = 0;
     return lru_index;
 }
 
@@ -138,13 +133,36 @@ static void update_lru(CacheSet *set, int accessed_index) {
         set->lines[accessed_index].age = 0;
 }
 
-static void record_transition(Cache* cache, MESI_State st) {
+void cache_record_transition(Cache *cache, MESI_State st) {
     if (!cache) return;
+    pthread_mutex_lock(&cache->lock);
     if (st >= 0 && st <= 3) cache->transitions[st]++;
+    pthread_mutex_unlock(&cache->lock);
+}
+void cache_increment_writebacks(Cache *cache) {
+    if (!cache) return;
+    pthread_mutex_lock(&cache->lock);
+    cache->writebacks++;
+    pthread_mutex_unlock(&cache->lock);
 }
 
+/* ------------------ Accesos ------------------ */
 
-/* ------------------ Operaciones públicas ------------------ */
+CacheLine* cache_get_line(Cache *cache, int addr) {
+    /* Esta función *no* toma lock por sí misma (llamar con lock tomado si se usa internalmente) */
+    if (!cache) return NULL;
+    int block = compute_block(addr);
+    int set_index = compute_set(block);
+    unsigned long tag = compute_tag(block);
+    CacheSet *set = &cache->sets[set_index];
+
+    for (int i = 0; i < WAYS; i++) {
+        if (set->lines[i].valid && set->lines[i].tag == tag) {
+            return &set->lines[i];
+        }
+    }
+    return NULL;
+}
 
 double cache_read(Cache *cache, int addr, int pe_id) {
     if (!cache) return 0.0;
@@ -172,21 +190,33 @@ double cache_read(Cache *cache, int addr, int pe_id) {
         }
     }
 
-    /* MISS: registrar, liberar lock y hacer broadcast */
+    /* MISS */
     cache->read_misses++;
     printf("[PE%d] CACHE MISS: Addr=%d Set=%d -> BusRd\n", pe_id, addr, set_index);
 
-    /* Liberar lock antes de emitir la petición al bus (evita deadlocks) */
+    /* Liberar lock antes de emitir la petición al bus (evita deadlocks con dispatcher) */
     pthread_mutex_unlock(&cache->lock);
 
-    bus_broadcast(cache->bus, BUS_RD, addr, pe_id);
+    /* Petición síncrona al bus.
+       bus_broadcast debe devolver int: 1 si hubo compartición, 0 si no. */
+    int was_shared = bus_broadcast(cache->bus, BUS_RD, addr, pe_id);
 
     /* Volver a tomar lock para completar la carga de la línea */
     pthread_mutex_lock(&cache->lock);
 
-    /* Recomputar set (puede haber cambiado por otras acciones) */
-    set = &cache->sets[set_index];
+    /* Re-check (otra entidad pudo haber respondido y llenado la cache) */
+    for (int i = 0; i < WAYS; i++) {
+        CacheLine *line = &set->lines[i];
+        if (line->valid && line->tag == tag) {
+            /* otro thread ya la puso */
+            update_lru(set, i);
+            double val = line->data[offset];
+            pthread_mutex_unlock(&cache->lock);
+            return val;
+        }
+    }
 
+    /* Reemplazar y cargar desde memoria (handler del bus ya hizo writeback si alguien tenía M) */
     int way;
     find_line_to_replace(set, cache, set_index, &way);
     CacheLine *line = &set->lines[way];
@@ -194,12 +224,13 @@ double cache_read(Cache *cache, int addr, int pe_id) {
     line->tag = tag;
     line->dirty = 0;
 
-    if (cache->bus && cache->bus->last_shared) {
+    /* Usar el valor devuelto por bus_broadcast para decidir E vs S */
+    if (was_shared) {
         line->state = S;
-        record_transition(cache, S);
+        cache->transitions[S]++;
     } else {
         line->state = E;
-        record_transition(cache, E);
+        cache->transitions[E]++;
     }
 
     int base = reconstruct_base(tag, set_index);
@@ -228,33 +259,42 @@ void cache_write(Cache *cache, int addr, double value, int pe_id) {
     int offset = compute_offset(addr);
     CacheSet *set = &cache->sets[set_index];
 
-    CacheLine *line = cache_get_line(cache, addr);
+    /* buscar línea (se hace sin locking extra porque ya tenemos lock) */
+    CacheLine *line = NULL;
+    for (int i = 0; i < WAYS; ++i) {
+        if (set->lines[i].valid && set->lines[i].tag == tag) { line = &set->lines[i]; break; }
+    }
+
     if (line) {
         cache->write_hits++;
         /* Caso hit */
         if (line->state == S) {
             /* Necesitamos BusUpgr: liberar lock, emitir, y luego reacceder con lock */
             pthread_mutex_unlock(&cache->lock);
-            bus_broadcast(cache->bus, BUS_UPGR, addr, pe_id);
+            /* recoger retorno por consistencia (aunque no lo usemos aquí) */
+            int upr_shared = bus_broadcast(cache->bus, BUS_UPGR, addr, pe_id);
+            (void)upr_shared;
             pthread_mutex_lock(&cache->lock);
 
-            /* Revalidar que la línea sigue ahí (si no, caer al manejo de miss) */
-            line = cache_get_line(cache, addr);
-            if (!line || !line->valid || line->tag != tag) {
-                /* Caer en camino de miss: no hay línea válida tras BusUpgr */
+            /* Revalidar que la línea siga ahí */
+            line = NULL;
+            for (int i = 0; i < WAYS; ++i) {
+                if (set->lines[i].valid && set->lines[i].tag == tag) { line = &set->lines[i]; break; }
+            }
+            if (!line) {
+                /* caer a miss handling */
                 cache->write_misses++;
                 pthread_mutex_unlock(&cache->lock);
-                /* Emitir BusRdX para obtener la línea en M */
-                bus_broadcast(cache->bus, BUS_RDX, addr, pe_id);
+                int rd_shared = bus_broadcast(cache->bus, BUS_RDX, addr, pe_id);
+                (void)rd_shared;
                 pthread_mutex_lock(&cache->lock);
-                /* Reemplazar e inicializar como en miss */
                 int way;
                 find_line_to_replace(set, cache, set_index, &way);
                 line = &set->lines[way];
                 line->valid = 1;
                 line->tag = tag;
                 line->state = M;
-                record_transition(cache, M);
+                cache->transitions[M]++;
                 line->dirty = 0;
                 int base = reconstruct_base(tag, set_index);
                 for (unsigned long o = 0; o < DOUBLES_PER_LINE; o++) {
@@ -270,13 +310,14 @@ void cache_write(Cache *cache, int addr, double value, int pe_id) {
                 pthread_mutex_unlock(&cache->lock);
                 return;
             }
-            /* Si la línea sigue válida, la promovemos a M */
+            /* promover a M */
             line->state = M;
-            record_transition(cache, M);
+            cache->transitions[M]++;
         } else if (line->state == E) {
             line->state = M;
-            record_transition(cache, M);
+            cache->transitions[M]++;
         }
+        /* escribir y marcar dirty */
         line->data[offset] = value;
         line->dirty = 1;
         update_lru(set, (int)(line - set->lines));
@@ -284,41 +325,48 @@ void cache_write(Cache *cache, int addr, double value, int pe_id) {
         return;
     }
 
-    /* Miss de escritura */
+    /* Miss de escritura: emitir BusRdX para obtener exclusividad */
     cache->write_misses++;
     printf("[PE%d] CACHE WRITE MISS: Addr=%d Set=%d -> BusRdX\n", pe_id, addr, set_index);
 
-    /* liberar lock antes de emitir BusRdX */
     pthread_mutex_unlock(&cache->lock);
-    bus_broadcast(cache->bus, BUS_RDX, addr, pe_id);
+    int rdx_shared = bus_broadcast(cache->bus, BUS_RDX, addr, pe_id);
+    (void)rdx_shared;
 
-    /* volver a tomar lock y completar la línea en estado M */
     pthread_mutex_lock(&cache->lock);
-    int way;
-    find_line_to_replace(set, cache, set_index, &way);
-    line = &set->lines[way];
-    line->valid = 1;
-    line->tag = tag;
-    line->state = M;
-    record_transition(cache, M);
-    line->dirty = 0;
-
-    int base = reconstruct_base(tag, set_index);
-    for (unsigned long o = 0; o < DOUBLES_PER_LINE; o++) {
-        int phys = base + (int)o;
-        Segment seg = addr_to_segment(phys);
-        int seg_base = seg_base_addr(seg);
-        int offset_in_seg = phys - seg_base;
-        line->data[o] = mem_read(seg, offset_in_seg);
+    /* re-check si otro puso la línea */
+    for (int i = 0; i < WAYS; ++i) {
+        if (set->lines[i].valid && set->lines[i].tag == tag) { line = &set->lines[i]; break; }
     }
-
+    if (!line) {
+        int way;
+        find_line_to_replace(set, cache, set_index, &way);
+        line = &set->lines[way];
+        line->valid = 1;
+        line->tag = tag;
+        line->state = M;
+        cache->transitions[M]++;
+        line->dirty = 0;
+        int base = reconstruct_base(tag, set_index);
+        for (unsigned long o = 0; o < DOUBLES_PER_LINE; o++) {
+            int phys = base + (int)o;
+            Segment seg = addr_to_segment(phys);
+            int seg_base = seg_base_addr(seg);
+            int offset_in_seg = phys - seg_base;
+            line->data[o] = mem_read(seg, offset_in_seg);
+        }
+    }
+    /* escribir */
     line->data[offset] = value;
     line->dirty = 1;
-    update_lru(set, way);
+    update_lru(set, (int)(line - set->lines));
     pthread_mutex_unlock(&cache->lock);
 }
+
 /* ------------------ Flush / Debug / Métricas ------------------ */
 
+/* cache_flush asegura que todas las líneas M/dirty se escriban en memoria.
+   Después invalidamos las líneas para forzar lecturas desde memoria en main. */
 void cache_flush(Cache *cache) {
     if (!cache) return;
     pthread_mutex_lock(&cache->lock);
@@ -340,6 +388,7 @@ void cache_flush(Cache *cache) {
                 cache->writebacks++;
                 line->dirty = 0;
             }
+            /* invalidamos para que main lea desde memoria */
             line->valid = 0;
             line->state = I;
             line->age = 0;
@@ -382,17 +431,4 @@ void debug_print_cache_states(Cache *caches, int num_pes) {
             }
         }
     }
-}
-void cache_record_transition(Cache *cache, MESI_State st) {
-    if (!cache) return;
-    pthread_mutex_lock(&cache->lock);
-    if (st >= 0 && st <= 3) cache->transitions[st]++;
-    pthread_mutex_unlock(&cache->lock);
-}
-
-void cache_increment_writebacks(Cache *cache) {
-    if (!cache) return;
-    pthread_mutex_lock(&cache->lock);
-    cache->writebacks++;
-    pthread_mutex_unlock(&cache->lock);
 }

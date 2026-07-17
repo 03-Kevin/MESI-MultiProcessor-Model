@@ -1,7 +1,8 @@
+// src/bus/bus.h
 #ifndef BUS_H
 #define BUS_H
 
-#include <pthread.h>        // <<-- necesario para pthread_mutex_t / pthread_cond_t / pthread_t
+#include <pthread.h>
 #include "../include/config.h"  // Ajusta ruta si hace falta
 
 // Forward declaration de Cache
@@ -16,6 +17,7 @@ typedef struct BusRequest {
     int addr;
     int src_pe;
     int processed;             // 0 = pendiente, 1 = procesado
+    int shared;                // resultado del handler (0 = no shared, 1 = shared)
     struct BusRequest *next;
     // sincronización específica de la petición (espera del thread solicitante)
     pthread_mutex_t mutex;
@@ -26,7 +28,7 @@ typedef struct BusRequest {
 typedef struct Bus {
     Cache* caches[NUM_PES];                       // Punteros a las cachés
     void (*handlers[4])(struct Bus*, int, int);   // Handlers para BUS_RD, BUS_RDX, etc.
-    int last_shared;
+    int last_shared;                              // usado internamente por handlers/dispatcher
     unsigned long traffic_count;
     unsigned long per_pe_bus_msgs[NUM_PES][4];    // Contadores de mensajes enviados por PE
 
@@ -43,7 +45,13 @@ typedef struct Bus {
 
 // Prototipos de funciones
 void bus_init(Bus* bus, Cache* caches[]);
-void bus_broadcast(Bus* bus, BusMsg msg, int addr, int src_pe); // bloquea hasta procesar
+/*
+ * bus_broadcast:
+ *  - Encola el mensaje y bloquea hasta que el dispatcher procese la petición.
+ *  - Devuelve 1 si el handler observó que la línea estaba compartida (equivalente
+ *    a lo que antes se leía de bus->last_shared), 0 en caso contrario.
+ */
+int  bus_broadcast(Bus* bus, BusMsg msg, int addr, int src_pe); // bloquea hasta procesar
 void bus_print_metrics(Bus* bus);
 void debug_print_bus_cache_states(Bus* bus);
 void bus_destroy(Bus* bus); // parar dispatcher (recomendado llamar antes de exit)

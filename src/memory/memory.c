@@ -2,15 +2,15 @@
 #include "memory.h"
 #include <stdio.h>
 #include <string.h>
-#include "include/config.h"
 #include <stdlib.h>
 #include <pthread.h>
+#include "../include/config.h"
 
 // Definición de la memoria principal y el mutex
 double main_memory[MEM_SIZE];
 pthread_mutex_t mem_lock;
 
-// Tamaños de cada segmento (opcional, para control)
+// Tamaños de cada segmento (nº de doubles)
 size_t segment_sizes[NUM_SEGMENTS] = {
     VECTOR_SIZE,   // VECTOR_A
     VECTOR_SIZE,   // VECTOR_B
@@ -31,11 +31,11 @@ size_t segment_bases[NUM_SEGMENTS] = {
 /* helper local: devuelve capacidad (nº de doubles) del segmento */
 static int segment_capacity_in_doubles(Segment seg) {
     switch (seg) {
-        case VECTOR_A: return VECTOR_B_ADDR - VECTOR_A_ADDR;
-        case VECTOR_B: return SUMS_ADDR - VECTOR_B_ADDR;
-        case SUMS:     return DONE_ADDR - SUMS_ADDR;
-        case DONE:     return RESULT_ADDR - DONE_ADDR;
-        case RESULT:   return MEM_SIZE - RESULT_ADDR;
+        case VECTOR_A: return (int)(segment_bases[VECTOR_B] - segment_bases[VECTOR_A]);
+        case VECTOR_B: return (int)(segment_bases[SUMS] - segment_bases[VECTOR_B]);
+        case SUMS:     return (int)(segment_bases[DONE] - segment_bases[SUMS]);
+        case DONE:     return (int)(segment_bases[RESULT] - segment_bases[DONE]);
+        case RESULT:   return (int)(MEM_SIZE - segment_bases[RESULT]);
         default:       return 0;
     }
 }
@@ -54,8 +54,10 @@ static inline size_t get_phys_addr(Segment seg, int offset) {
         fprintf(stderr, "Error: segmento inválido en get_phys_addr (%d)\n", seg);
         exit(EXIT_FAILURE);
     }
-    if (offset < 0 || (size_t)offset >= segment_sizes[seg]) {
-        fprintf(stderr, "Error: Offset fuera de rango en el segmento %d (offset=%d seg_size=%zu)\n", seg, offset, segment_sizes[seg]);
+    int seg_capacity = segment_capacity_in_doubles(seg);
+    if (offset < 0 || offset >= seg_capacity) {
+        fprintf(stderr, "Error: Offset fuera de rango en el segmento %d (offset=%d seg_size=%d)\n",
+                seg, offset, seg_capacity);
         exit(EXIT_FAILURE);
     }
     size_t addr = segment_bases[seg] + (size_t)offset;
@@ -94,7 +96,8 @@ double mem_read(Segment seg, int offset) {
     pthread_mutex_lock(&mem_lock);
     double val = main_memory[addr];
     pthread_mutex_unlock(&mem_lock);
-    printf("[DEBUG] Leyendo en memoria: Segmento=%d, Offset=%d, Addr=%zu, Valor=%f\n", seg, offset, addr, val);
+    printf("[DEBUG] Leyendo en memoria: Segmento=%d, Offset=%d, Addr=%zu, Valor=%f\n",
+           seg, offset, addr, val);
     return val;
 }
 
@@ -104,7 +107,8 @@ void mem_write(Segment seg, int offset, double value) {
     pthread_mutex_lock(&mem_lock);
     main_memory[addr] = value;
     pthread_mutex_unlock(&mem_lock);
-    printf("[DEBUG] Escribiendo en memoria: Segmento=%d, Offset=%d, Addr=%zu, Valor=%f\n", seg, offset, addr, value);
+    printf("[DEBUG] Escribiendo en memoria: Segmento=%d, Offset=%d, Addr=%zu, Valor=%f\n",
+           seg, offset, addr, value);
 }
 
 /*
@@ -144,6 +148,7 @@ int mem_load_data(Segment seg, int offset, const double *data, size_t count, int
         return -1;
     }
 
+    /* Copiar atómicamente usando mem_write (ya protegido por mem_lock) */
     for (size_t i = 0; i < count; ++i) {
         mem_write(seg, aligned_offset + (int)i, data[i]);
     }

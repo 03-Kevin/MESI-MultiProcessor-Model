@@ -1,3 +1,4 @@
+// src/bus/bus.c
 #include "bus.h"
 #include "../cache/cache.h"
 #include "handlers.h"
@@ -5,15 +6,16 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../mesi/mesi.h"   // for mesi_state_to_str in debug printing
 
 // Convierte un mensaje del bus a su representación en cadena
-const char* bus_msg_to_str(BusMsg msg) {
+static const char* bus_msg_to_str(BusMsg msg) {
     switch (msg) {
-        case BUS_RD: return "BusRd";
-        case BUS_RDX: return "BusRdX";
+        case BUS_RD:   return "BusRd";
+        case BUS_RDX:  return "BusRdX";
         case BUS_UPGR: return "BusUpgr";
-        case BUS_WB: return "BusWB";
-        default: return "Unknown";
+        case BUS_WB:   return "BusWB";
+        default:       return "Unknown";
     }
 }
 
@@ -41,33 +43,32 @@ static void* bus_dispatcher(void* arg) {
             bus->req_head = req->next;
             if (!bus->req_head) bus->req_tail = NULL;
         }
-        // marcar que vamos a procesar ésta petición (dejamos queue_lock liberado
-        // durante la ejecución del handler para permitir encolados)
+        // dejamos queue_lock liberado durante la ejecución del handler
         pthread_mutex_unlock(&bus->queue_lock);
 
         if (req) {
             // contabilizar tráfico
             bus->traffic_count++;
-            if (req->src_pe >= 0 && req->src_pe < NUM_PES && req->msg >= 0 && req->msg <= 3)
+            if (req->src_pe >= 0 && req->src_pe < NUM_PES && req->msg >= 0 && req->msg <= BUS_WB)
                 bus->per_pe_bus_msgs[req->src_pe][req->msg]++;
 
-            // Resetear shared flag antes del handler
+            // Resetear shared flag antes del handler (uso interno)
             bus->last_shared = 0;
 
             // Ejecutar handler (los handlers usan locks propios para proteger caches)
             if (bus->handlers[req->msg]) {
-                // Nota: handler modifica caches y bus->last_shared según sea necesario.
                 bus->handlers[req->msg](bus, req->addr, req->src_pe);
             } else {
                 printf("[BUS] ⚠️ No hay handler definido para %s\n", bus_msg_to_str(req->msg));
             }
 
-            // Notificar al thread que encoló la petición que ya está procesada
+            // Copiar el resultado del handler (bus->last_shared) dentro de la request
             pthread_mutex_lock(&req->mutex);
+            req->shared = bus->last_shared ? 1 : 0;
             req->processed = 1;
             pthread_cond_signal(&req->cond);
             pthread_mutex_unlock(&req->mutex);
-            // el thread solicitante liberará y destruirá req (liberación de memoria)
+            // El thread solicitante liberará y destruirá req (liberación de memoria)
         }
     }
 
@@ -88,7 +89,7 @@ void bus_init(Bus* bus, Cache* caches[]) {
             exit(EXIT_FAILURE);
         }
         bus->caches[i] = caches[i];
-        for (int j = 0; j < 4; j++) {
+        for (int j = 0; j <= BUS_WB; j++) {
             bus->per_pe_bus_msgs[i][j] = 0;  // Inicializar contadores de mensajes
         }
     }
@@ -113,7 +114,11 @@ void bus_init(Bus* bus, Cache* caches[]) {
     printf("[BUS] Initialized (dispatcher running).\n");
 }
 
-void bus_broadcast(Bus* bus, BusMsg msg, int addr, int src_pe) {
+/*
+ * Encola una petición y bloquea hasta que se procese.
+ * Devuelve 1 si el handler encontró que la línea estaba compartida (shared), 0 si no.
+ */
+int bus_broadcast(Bus* bus, BusMsg msg, int addr, int src_pe) {
     if (!bus) {
         fprintf(stderr, "[BUS] Error: Bus no inicializado en bus_broadcast.\n");
         exit(EXIT_FAILURE);
@@ -139,6 +144,7 @@ void bus_broadcast(Bus* bus, BusMsg msg, int addr, int src_pe) {
     req->addr = addr;
     req->src_pe = src_pe;
     req->processed = 0;
+    req->shared = 0;
     req->next = NULL;
     pthread_mutex_init(&req->mutex, NULL);
     pthread_cond_init(&req->cond, NULL);
@@ -154,18 +160,20 @@ void bus_broadcast(Bus* bus, BusMsg msg, int addr, int src_pe) {
 
     printf("[BUS] Señal %s encolada por PE%d para Addr=%d\n", bus_msg_to_str(msg), src_pe, addr);
 
-    // Esperar a que el dispatcher procese la petición
+    // Esperar a que el dispatcher procese la petición (comportamiento bloqueante)
     pthread_mutex_lock(&req->mutex);
     while (!req->processed) {
         pthread_cond_wait(&req->cond, &req->mutex);
     }
+    int was_shared = req->shared; // lectura sincronizada
     pthread_mutex_unlock(&req->mutex);
 
-    // El dispatcher ya procesó; bus->last_shared fue actualizado por el handler
     // Liberar recursos de la petición
     pthread_cond_destroy(&req->cond);
     pthread_mutex_destroy(&req->mutex);
     free(req);
+
+    return was_shared;
 }
 
 void bus_print_metrics(Bus* bus) {

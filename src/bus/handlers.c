@@ -8,6 +8,13 @@
 #include <pthread.h>
 #include "../mesi/mesi.h"
 
+/*
+ * Nota: este módulo asume que:
+ *  - Bus *bus tiene arreglo bus->caches[] con punteros a Cache
+ *  - Cache tiene mutex lock, y funciones cache_get_line, etc.
+ *  - mem_write, addr_to_segment están disponibles desde memory.h
+ */
+
 /* Registra los handlers en la tabla del bus */
 void bus_register_handlers(Bus* bus) {
     bus->handlers[BUS_RD]   = handle_busrd;
@@ -15,6 +22,10 @@ void bus_register_handlers(Bus* bus) {
     bus->handlers[BUS_UPGR] = handle_busupgr;
     bus->handlers[BUS_WB]   = handle_buswb;
 }
+
+/* Serializa la ejecución de los handlers para eliminar interleavings ruidosos
+   durante la depuración. Mantener mientras depuras; puedes quitarlo luego. */
+static pthread_mutex_t bus_handler_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int compute_block(int addr) { return addr / DOUBLES_PER_LINE; }
 static int compute_set(int block) { return block % SETS; }
@@ -32,6 +43,7 @@ static int seg_base_addr(Segment seg) {
 }
 
 void handle_busrd(Bus* bus, int addr, int src_pe) {
+    pthread_mutex_lock(&bus_handler_lock);
     printf("[BUS] Handler BusRd (PE%d, addr=%d)\n", src_pe, addr);
     bus->last_shared = 0;
     int block = compute_block(addr);
@@ -48,7 +60,7 @@ void handle_busrd(Bus* bus, int addr, int src_pe) {
         if (line && line->valid) {
             bus->last_shared = 1;
             if (line->state == M) {
-                unsigned long block_num = line->tag * SETS + compute_set(block);
+                unsigned long block_num = line->tag * SETS + (unsigned long)compute_set(block);
                 int base = (int)(block_num * DOUBLES_PER_LINE);
                 for (unsigned long off = 0; off < DOUBLES_PER_LINE; off++) {
                     int phys = base + (int)off;
@@ -58,8 +70,10 @@ void handle_busrd(Bus* bus, int addr, int src_pe) {
                     if (offset_in_seg < 0) {
                         fprintf(stderr, "Error: Escritura fuera de los límites en handle_busrd (base=%d, offset=%lu)\n", base, off);
                         pthread_mutex_unlock(&other_cache->lock);
+                        pthread_mutex_unlock(&bus_handler_lock);
                         exit(EXIT_FAILURE);
                     }
+                    /* writeback de la línea modificada a memoria */
                     mem_write(seg, offset_in_seg, line->data[off]);
                 }
                 line->dirty = 0;
@@ -77,9 +91,11 @@ void handle_busrd(Bus* bus, int addr, int src_pe) {
     if (!bus->last_shared) {
         printf("[BUS] Ninguna cache tenía la línea; responder desde memoria\n");
     }
+    pthread_mutex_unlock(&bus_handler_lock);
 }
 
 void handle_busrdx(Bus* bus, int addr, int src_pe) {
+    pthread_mutex_lock(&bus_handler_lock);
     printf("[BUS] Handler BusRdX (PE%d, addr=%d)\n", src_pe, addr);
     bus->last_shared = 0;
     int block = compute_block(addr);
@@ -95,7 +111,7 @@ void handle_busrdx(Bus* bus, int addr, int src_pe) {
         if (line && line->valid) {
             bus->last_shared = 1;
             if (line->state == M) {
-                unsigned long block_num = line->tag * SETS + compute_set(block);
+                unsigned long block_num = line->tag * SETS + (unsigned long)compute_set(block);
                 int base = (int)(block_num * DOUBLES_PER_LINE);
                 for (unsigned long off = 0; off < DOUBLES_PER_LINE; off++) {
                     int phys = base + (int)off;
@@ -105,6 +121,7 @@ void handle_busrdx(Bus* bus, int addr, int src_pe) {
                     if (offset_in_seg < 0) {
                         fprintf(stderr, "Error: Escritura fuera de los límites en handle_busrdx (base=%d, offset=%lu)\n", base, off);
                         pthread_mutex_unlock(&other_cache->lock);
+                        pthread_mutex_unlock(&bus_handler_lock);
                         exit(EXIT_FAILURE);
                     }
                     mem_write(seg, offset_in_seg, line->data[off]);
@@ -120,9 +137,11 @@ void handle_busrdx(Bus* bus, int addr, int src_pe) {
         }
         pthread_mutex_unlock(&other_cache->lock);
     }
+    pthread_mutex_unlock(&bus_handler_lock);
 }
 
 void handle_busupgr(Bus* bus, int addr, int src_pe) {
+    pthread_mutex_lock(&bus_handler_lock);
     printf("[BUS] Handler BusUpgr (PE%d, addr=%d)\n", src_pe, addr);
     int block = compute_block(addr);
 
@@ -142,20 +161,25 @@ void handle_busupgr(Bus* bus, int addr, int src_pe) {
         }
         pthread_mutex_unlock(&other_cache->lock);
     }
+    pthread_mutex_unlock(&bus_handler_lock);
 }
 
 void handle_buswb(Bus* bus, int addr, int src_pe) {
+    pthread_mutex_lock(&bus_handler_lock);
     printf("[BUS] Handler BusWB (PE%d, addr=%d)\n", src_pe, addr);
 
     Cache *src_cache = bus->caches[src_pe];
-    if (!src_cache) return;
+    if (!src_cache) {
+        pthread_mutex_unlock(&bus_handler_lock);
+        return;
+    }
 
     /* Protegemos la cache del emisor (por si acaso) */
     pthread_mutex_lock(&src_cache->lock);
     CacheLine* line = cache_get_line(src_cache, addr);
     if (line && line->state == M) {
         int block = compute_block(addr);
-        unsigned long block_num = line->tag * SETS + compute_set(block);
+        unsigned long block_num = line->tag * SETS + (unsigned long)compute_set(block);
         int base = (int)(block_num * DOUBLES_PER_LINE);
         for (unsigned long off = 0; off < DOUBLES_PER_LINE; off++) {
             int phys = base + (int)off;
@@ -165,6 +189,7 @@ void handle_buswb(Bus* bus, int addr, int src_pe) {
             if (offset_in_seg < 0) {
                 fprintf(stderr, "Error: Escritura fuera de los límites en handle_buswb (base=%d, offset=%lu)\n", base, off);
                 pthread_mutex_unlock(&src_cache->lock);
+                pthread_mutex_unlock(&bus_handler_lock);
                 exit(EXIT_FAILURE);
             }
             mem_write(seg, offset_in_seg, line->data[off]);
@@ -175,4 +200,5 @@ void handle_buswb(Bus* bus, int addr, int src_pe) {
         printf("[BUS] PE%d: M -> S luego de WB base=%d\n", src_pe, base);
     }
     pthread_mutex_unlock(&src_cache->lock);
+    pthread_mutex_unlock(&bus_handler_lock);
 }
